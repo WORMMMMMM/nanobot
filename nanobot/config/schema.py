@@ -173,6 +173,7 @@ class ProviderConfig(BaseModel):
     api_key: str = ""
     api_base: str | None = None
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
+    api_mode: str = "chat"  # "chat" = Chat Completions, "responses" = OpenAI Responses API
 
 
 class ProvidersConfig(BaseModel):
