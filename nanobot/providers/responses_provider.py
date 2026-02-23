@@ -112,7 +112,7 @@ class ResponsesProvider(LLMProvider):
                     f"known_ids={list(tool_calls.keys())}  delta={getattr(event, 'delta', '')!r}"
                 )
                 if call_id in tool_calls:
-                    tool_calls[call_id]["arguments_raw"] += event.delta
+                    tool_calls[call_id]["arguments_raw"] += getattr(event, "delta", "")
                 else:
                     tool_calls.setdefault(call_id, {"name": "", "external_call_id": call_id, "arguments_raw": ""})
                     tool_calls[call_id]["arguments_raw"] += getattr(event, "delta", "")
