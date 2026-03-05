@@ -33,6 +33,12 @@ class SubagentManager:
         bus: MessageBus,
         model: str | None = None,
         brave_api_key: str | None = None,
+        web_search_provider: str = "brave",
+        searxng_base_url: str = "http://localhost:8080",
+        searxng_language: str = "zh-CN",
+        searxng_engines: str = "",
+        web_search_fallback_to_brave: bool = True,
+        web_search_timeout_seconds: float = 10.0,
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
     ):
@@ -42,6 +48,12 @@ class SubagentManager:
         self.bus = bus
         self.model = model or provider.get_default_model()
         self.brave_api_key = brave_api_key
+        self.web_search_provider = web_search_provider
+        self.searxng_base_url = searxng_base_url
+        self.searxng_language = searxng_language
+        self.searxng_engines = searxng_engines
+        self.web_search_fallback_to_brave = web_search_fallback_to_brave
+        self.web_search_timeout_seconds = web_search_timeout_seconds
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
@@ -107,7 +119,15 @@ class SubagentManager:
                 timeout=self.exec_config.timeout,
                 restrict_to_workspace=self.restrict_to_workspace,
             ))
-            tools.register(WebSearchTool(api_key=self.brave_api_key))
+            tools.register(WebSearchTool(
+                api_key=self.brave_api_key,
+                provider=self.web_search_provider,
+                searxng_base_url=self.searxng_base_url,
+                searxng_language=self.searxng_language,
+                searxng_engines=self.searxng_engines,
+                fallback_to_brave=self.web_search_fallback_to_brave,
+                timeout_seconds=self.web_search_timeout_seconds,
+            ))
             tools.register(WebFetchTool())
             
             # Build messages with subagent-specific prompt

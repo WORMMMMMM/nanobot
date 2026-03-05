@@ -44,7 +44,7 @@ def _validate_url(url: str) -> tuple[bool, str]:
 
 
 class WebSearchTool(Tool):
-    """Search the web using Brave Search API."""
+    """Search the web using Brave Search API or a self-hosted SearXNG."""
     
     name = "web_search"
     description = "Search the web. Returns titles, URLs, and snippets."
@@ -57,22 +57,63 @@ class WebSearchTool(Tool):
         "required": ["query"]
     }
     
-    def __init__(self, api_key: str | None = None, max_results: int = 5):
-        self.api_key = api_key or os.environ.get("BRAVE_API_KEY", "")
+    def __init__(
+        self,
+        api_key: str | None = None,
+        max_results: int = 5,
+        provider: str = "brave",
+        searxng_base_url: str = "http://localhost:8080",
+        searxng_language: str = "zh-CN",
+        searxng_engines: str = "",
+        fallback_to_brave: bool = True,
+        timeout_seconds: float = 10.0,
+    ):
+        self.provider = (provider or "brave").strip().lower()
+        self.brave_api_key = api_key or os.environ.get("BRAVE_API_KEY", "")
+        self.searxng_base_url = (searxng_base_url or "").rstrip("/")
+        self.searxng_language = searxng_language or "zh-CN"
+        self.searxng_engines = searxng_engines or ""
+        self.fallback_to_brave = fallback_to_brave
+        self.timeout_seconds = max(float(timeout_seconds), 1.0)
         self.max_results = max_results
     
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
-        if not self.api_key:
-            return "Error: BRAVE_API_KEY not configured"
-        
+        provider = (kwargs.get("provider") or self.provider).strip().lower()
+        n = min(max(count or self.max_results, 1), 10)
+
+        if provider == "searxng":
+            try:
+                return await self._search_searxng(query, n)
+            except Exception as e:
+                if self.fallback_to_brave and self.brave_api_key:
+                    try:
+                        fallback = await self._search_brave(query, n)
+                        return (
+                            f"SearXNG unavailable ({e}). Fallback to Brave succeeded.\n\n"
+                            f"{fallback}"
+                        )
+                    except Exception as fallback_error:
+                        return f"Error: SearXNG failed ({e}); Brave fallback failed ({fallback_error})"
+                return f"Error: SearXNG search failed: {e}"
+
+        if provider == "brave":
+            if not self.brave_api_key:
+                return "Error: BRAVE_API_KEY not configured"
+            try:
+                return await self._search_brave(query, n)
+            except Exception as e:
+                return f"Error: {e}"
+
+        return f"Error: Unsupported web_search provider '{provider}' (expected 'brave' or 'searxng')"
+
+    async def _search_brave(self, query: str, count: int) -> str:
         try:
-            n = min(max(count or self.max_results, 1), 10)
             async with httpx.AsyncClient() as client:
                 r = await client.get(
                     "https://api.search.brave.com/res/v1/web/search",
-                    params={"q": query, "count": n},
-                    headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
-                    timeout=10.0
+                    params={"q": query, "count": count},
+                    headers={"Accept": "application/json", "X-Subscription-Token": self.brave_api_key},
+                    timeout=self.timeout_seconds
                 )
                 r.raise_for_status()
             
@@ -80,14 +121,49 @@ class WebSearchTool(Tool):
             if not results:
                 return f"No results for: {query}"
             
-            lines = [f"Results for: {query}\n"]
-            for i, item in enumerate(results[:n], 1):
+            lines = [f"Results for: {query} (source: brave)\n"]
+            for i, item in enumerate(results[:count], 1):
                 lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
                 if desc := item.get("description"):
                     lines.append(f"   {desc}")
             return "\n".join(lines)
+
         except Exception as e:
-            return f"Error: {e}"
+            raise RuntimeError(str(e)) from e
+
+    async def _search_searxng(self, query: str, count: int) -> str:
+        if not self.searxng_base_url:
+            raise RuntimeError("searxng_base_url is not configured")
+        endpoint = f"{self.searxng_base_url}/search"
+        params: dict[str, Any] = {
+            "q": query,
+            "format": "json",
+            "language": self.searxng_language,
+        }
+        if self.searxng_engines:
+            params["engines"] = self.searxng_engines
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                endpoint,
+                params=params,
+                timeout=self.timeout_seconds,
+                headers={"User-Agent": USER_AGENT},
+            )
+            r.raise_for_status()
+        payload = r.json()
+        results = payload.get("results", []) or []
+        if not results:
+            return f"No results for: {query}"
+
+        lines = [f"Results for: {query} (source: searxng)\n"]
+        for i, item in enumerate(results[:count], 1):
+            title = item.get("title", "")
+            url = item.get("url", "")
+            lines.append(f"{i}. {title}\n   {url}")
+            desc = item.get("content") or item.get("description") or item.get("snippet")
+            if desc:
+                lines.append(f"   {desc}")
+        return "\n".join(lines)
 
 
 class WebFetchTool(Tool):

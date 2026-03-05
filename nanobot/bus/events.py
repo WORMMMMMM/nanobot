@@ -13,6 +13,7 @@ class InboundMessage:
     sender_id: str  # User identifier
     chat_id: str  # Chat/channel identifier
     content: str  # Message text
+    session_id: str | None = None  # Optional explicit session key override
     timestamp: datetime = field(default_factory=datetime.now)
     media: list[str] = field(default_factory=list)  # Media URLs
     metadata: dict[str, Any] = field(default_factory=dict)  # Channel-specific data
@@ -20,7 +21,7 @@ class InboundMessage:
     @property
     def session_key(self) -> str:
         """Unique key for session identification."""
-        return f"{self.channel}:{self.chat_id}"
+        return self.session_id or f"{self.channel}:{self.chat_id}"
 
 
 @dataclass
@@ -33,5 +34,4 @@ class OutboundMessage:
     reply_to: str | None = None
     media: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
-
 

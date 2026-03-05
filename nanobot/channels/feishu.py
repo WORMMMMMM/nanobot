@@ -22,7 +22,10 @@ try:
         CreateMessageReactionRequest,
         CreateMessageReactionRequestBody,
         Emoji,
+        GetMessageRequest,
         P2ImMessageReceiveV1,
+        ReplyMessageRequest,
+        ReplyMessageRequestBody,
     )
     FEISHU_AVAILABLE = True
 except ImportError:
@@ -159,6 +162,49 @@ class FeishuChannel(BaseChannel):
         
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._add_reaction_sync, message_id, emoji_type)
+
+    @staticmethod
+    def _decode_message_content(msg_type: str, raw_content: str | None) -> str:
+        """Decode Feishu message body to plain text for LLM context."""
+        if msg_type == "text":
+            try:
+                return json.loads(raw_content or "{}").get("text", "").strip()
+            except json.JSONDecodeError:
+                return (raw_content or "").strip()
+        return MSG_TYPE_MAP.get(msg_type, f"[{msg_type}]")
+
+    def _get_message_content_sync(self, message_id: str) -> tuple[str, str] | None:
+        """Fetch a message by ID and return decoded content + type."""
+        try:
+            request = GetMessageRequest.builder().message_id(message_id).build()
+            response = self._client.im.v1.message.get(request)
+            if not response.success():
+                logger.warning(
+                    "Failed to fetch replied message: id={}, code={}, msg={}",
+                    message_id,
+                    response.code,
+                    response.msg,
+                )
+                return None
+            items = getattr(getattr(response, "data", None), "items", None) or []
+            if not items:
+                return None
+            item = items[0]
+            msg_type = getattr(item, "msg_type", "") or ""
+            body = getattr(item, "body", None)
+            raw_content = getattr(body, "content", "") if body else ""
+            decoded = self._decode_message_content(msg_type, raw_content)
+            return decoded, msg_type
+        except Exception as e:
+            logger.warning(f"Failed to fetch replied message {message_id}: {e}")
+            return None
+
+    async def _get_message_content(self, message_id: str) -> tuple[str, str] | None:
+        """Async wrapper to fetch message details without blocking event loop."""
+        if not self._client or not message_id:
+            return None
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._get_message_content_sync, message_id)
     
     # Regex to match markdown tables (header + separator + data rows)
     _TABLE_RE = re.compile(
@@ -205,13 +251,6 @@ class FeishuChannel(BaseChannel):
             return
         
         try:
-            # Determine receive_id_type based on chat_id format
-            # open_id starts with "ou_", chat_id starts with "oc_"
-            if msg.chat_id.startswith("oc_"):
-                receive_id_type = "chat_id"
-            else:
-                receive_id_type = "open_id"
-            
             # Build card with markdown + table support
             elements = self._build_card_elements(msg.content)
             card = {
@@ -219,18 +258,41 @@ class FeishuChannel(BaseChannel):
                 "elements": elements,
             }
             content = json.dumps(card, ensure_ascii=False)
-            
-            request = CreateMessageRequest.builder() \
-                .receive_id_type(receive_id_type) \
-                .request_body(
-                    CreateMessageRequestBody.builder()
-                    .receive_id(msg.chat_id)
-                    .msg_type("interactive")
-                    .content(content)
-                    .build()
-                ).build()
-            
-            response = self._client.im.v1.message.create(request)
+
+            metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+            feishu_meta = metadata.get("feishu") if isinstance(metadata.get("feishu"), dict) else {}
+            reply_to_message_id = (
+                msg.reply_to
+                or feishu_meta.get("reply_to_message_id")
+                or metadata.get("reply_to_message_id")
+                or metadata.get("message_id")
+            )
+
+            if reply_to_message_id:
+                request = ReplyMessageRequest.builder() \
+                    .message_id(reply_to_message_id) \
+                    .request_body(
+                        ReplyMessageRequestBody.builder()
+                        .msg_type("interactive")
+                        .content(content)
+                        .reply_in_thread(True)
+                        .build()
+                    ).build()
+                response = self._client.im.v1.message.reply(request)
+            else:
+                # Determine receive_id_type based on chat_id format
+                # open_id starts with "ou_", chat_id starts with "oc_"
+                receive_id_type = "chat_id" if msg.chat_id.startswith("oc_") else "open_id"
+                request = CreateMessageRequest.builder() \
+                    .receive_id_type(receive_id_type) \
+                    .request_body(
+                        CreateMessageRequestBody.builder()
+                        .receive_id(msg.chat_id)
+                        .msg_type("interactive")
+                        .content(content)
+                        .build()
+                    ).build()
+                response = self._client.im.v1.message.create(request)
             
             if not response.success():
                 logger.error(
@@ -238,7 +300,10 @@ class FeishuChannel(BaseChannel):
                     f"msg={response.msg}, log_id={response.get_log_id()}"
                 )
             else:
-                logger.debug(f"Feishu message sent to {msg.chat_id}")
+                if reply_to_message_id:
+                    logger.info(f"Feishu reply sent to message {reply_to_message_id}")
+                else:
+                    logger.info(f"Feishu message sent to {msg.chat_id}")
                 
         except Exception as e:
             logger.error(f"Error sending Feishu message: {e}")
@@ -277,33 +342,81 @@ class FeishuChannel(BaseChannel):
             chat_id = message.chat_id
             chat_type = message.chat_type  # "p2p" or "group"
             msg_type = message.message_type
+            parent_id = message.parent_id or ""
+            root_id = message.root_id or ""
+            thread_id = message.thread_id or ""
             
             # Add reaction to indicate "seen"
             await self._add_reaction(message_id, "THUMBSUP")
             
             # Parse message content
-            if msg_type == "text":
-                try:
-                    content = json.loads(message.content).get("text", "")
-                except json.JSONDecodeError:
-                    content = message.content or ""
-            else:
-                content = MSG_TYPE_MAP.get(msg_type, f"[{msg_type}]")
+            content = self._decode_message_content(msg_type, message.content)
             
             if not content:
                 return
+
+            replied_message = await self._get_message_content(parent_id) if parent_id else None
+            replied_text = replied_message[0] if replied_message else ""
+            replied_msg_type = replied_message[1] if replied_message else ""
+            if replied_text:
+                content = f"[Replied Message]\n{replied_text}\n\n[New Message]\n{content}"
+
+            reply_target = chat_id if chat_type == "group" else sender_id
+            main_session_key = f"{self.name}:{reply_target}"
+            thread_anchor = root_id or parent_id
+            session_id = f"{main_session_key}:t:{thread_anchor}" if thread_anchor else None
+            try:
+                inherit_rounds = max(0, int(getattr(self.config, "thread_inherit_rounds", 6)))
+            except (TypeError, ValueError):
+                inherit_rounds = 6
+            inherit_messages = inherit_rounds * 2
+
+            logger.info(
+                f"Feishu inbound message: sender={sender_id}, chat={chat_id}, "
+                f"chat_type={chat_type}, msg_type={msg_type}, session={session_id or main_session_key}, "
+                f"content={content[:120]!r}"
+            )
             
             # Forward to message bus
-            reply_to = chat_id if chat_type == "group" else sender_id
-            await self._handle_message(
-                sender_id=sender_id,
-                chat_id=reply_to,
-                content=content,
-                metadata={
+            metadata = {
+                "message_id": message_id,
+                "reply_to_message_id": message_id,
+                "chat_type": chat_type,
+                "msg_type": msg_type,
+                "parent_id": parent_id,
+                "root_id": root_id,
+                "thread_id": thread_id,
+                "thread_anchor": thread_anchor,
+                "feishu": {
                     "message_id": message_id,
+                    "reply_to_message_id": message_id,
                     "chat_type": chat_type,
                     "msg_type": msg_type,
+                    "parent_id": parent_id,
+                    "root_id": root_id,
+                    "thread_id": thread_id,
+                    "thread_anchor": thread_anchor,
+                },
+            }
+            if replied_text:
+                metadata["replied_message"] = {
+                    "message_id": parent_id,
+                    "msg_type": replied_msg_type,
+                    "content": replied_text,
                 }
+                metadata["feishu"]["replied_message"] = metadata["replied_message"]
+            if session_id and inherit_messages > 0:
+                metadata["session_parent_key"] = main_session_key
+                metadata["session_bootstrap_max_messages"] = inherit_messages
+                metadata["feishu"]["session_parent_key"] = main_session_key
+                metadata["feishu"]["session_bootstrap_max_messages"] = inherit_messages
+
+            await self._handle_message(
+                sender_id=sender_id,
+                chat_id=reply_target,
+                content=content,
+                metadata=metadata,
+                session_id=session_id,
             )
             
         except Exception as e:

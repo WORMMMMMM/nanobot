@@ -104,6 +104,8 @@ Only use the 'message' tool when you need to send a message to a specific chat c
 For normal conversation, just respond with text - do not call the message tool.
 
 Always be helpful, accurate, and concise. When using tools, explain what you're doing.
+When users ask for data you can fetch (time/weather/web), either fetch and return concrete results in this same reply, or clearly state limits now.
+Do not end with deferred promises like "please wait", "I will get back later", "稍等我马上返回结果".
 When remembering something, write to {workspace_path}/memory/MEMORY.md"""
     
     def _load_bootstrap_files(self) -> str:

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,33 @@ class AgentLoop:
     4. Executes tool calls
     5. Sends responses back
     """
+
+    _DEFERRED_REPLY_PATTERNS = [
+        r"请稍等",
+        r"稍等",
+        r"稍后",
+        r"稍后回复",
+        r"稍后返回",
+        r"马上返回",
+        r"马上给你",
+        r"马上回复",
+        r"我这就",
+        r"我去查",
+        r"我先去查",
+        r"我现在去查",
+        r"一会儿",
+        r"待会",
+        r"\bplease wait\b",
+        r"\bone moment\b",
+        r"\bhang on\b",
+        r"\bi(?:'| a)?m\s+(?:checking|looking up)\b",
+        r"\bi(?:'ll| will)\s+(?:check|look up|get back|return)\b",
+    ]
+    _FORCE_FINAL_REPLY_PROMPT = (
+        "Do not postpone. Either call tools now and return concrete results in this same reply, "
+        "or clearly state current limits and provide the best possible direct answer now. "
+        "Do not say 'please wait', 'I will return later', or similar deferred promises."
+    )
     
     def __init__(
         self,
@@ -42,6 +70,12 @@ class AgentLoop:
         model: str | None = None,
         max_iterations: int = 100,
         brave_api_key: str | None = None,
+        web_search_provider: str = "brave",
+        searxng_base_url: str = "http://localhost:8080",
+        searxng_language: str = "zh-CN",
+        searxng_engines: str = "",
+        web_search_fallback_to_brave: bool = True,
+        web_search_timeout_seconds: float = 10.0,
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
         restrict_to_workspace: bool = False,
@@ -55,6 +89,12 @@ class AgentLoop:
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
         self.brave_api_key = brave_api_key
+        self.web_search_provider = web_search_provider
+        self.searxng_base_url = searxng_base_url
+        self.searxng_language = searxng_language
+        self.searxng_engines = searxng_engines
+        self.web_search_fallback_to_brave = web_search_fallback_to_brave
+        self.web_search_timeout_seconds = web_search_timeout_seconds
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
@@ -68,6 +108,12 @@ class AgentLoop:
             bus=bus,
             model=self.model,
             brave_api_key=brave_api_key,
+            web_search_provider=web_search_provider,
+            searxng_base_url=searxng_base_url,
+            searxng_language=searxng_language,
+            searxng_engines=searxng_engines,
+            web_search_fallback_to_brave=web_search_fallback_to_brave,
+            web_search_timeout_seconds=web_search_timeout_seconds,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
         )
@@ -92,7 +138,15 @@ class AgentLoop:
         ))
         
         # Web tools
-        self.tools.register(WebSearchTool(api_key=self.brave_api_key))
+        self.tools.register(WebSearchTool(
+            api_key=self.brave_api_key,
+            provider=self.web_search_provider,
+            searxng_base_url=self.searxng_base_url,
+            searxng_language=self.searxng_language,
+            searxng_engines=self.searxng_engines,
+            fallback_to_brave=self.web_search_fallback_to_brave,
+            timeout_seconds=self.web_search_timeout_seconds,
+        ))
         self.tools.register(WebFetchTool())
         
         # Message tool
@@ -161,6 +215,7 @@ class AgentLoop:
         
         # Get or create session
         session = self.sessions.get_or_create(msg.session_key)
+        self._bootstrap_child_session(msg, session)
         
         # Update tool contexts
         message_tool = self.tools.get("message")
@@ -187,6 +242,7 @@ class AgentLoop:
         # Agent loop
         iteration = 0
         final_content = None
+        deferred_retry_count = 0
         
         while iteration < self.max_iterations:
             iteration += 1
@@ -226,8 +282,25 @@ class AgentLoop:
                         messages, tool_call.id, tool_call.name, result
                     )
             else:
-                # No tool calls, we're done
-                final_content = response.content
+                # No tool calls: avoid deferred placeholder replies.
+                content = response.content or ""
+                if (
+                    deferred_retry_count < 1
+                    and self._looks_like_deferred_reply(content)
+                ):
+                    deferred_retry_count += 1
+                    logger.warning(
+                        "Deferred placeholder reply detected (no tools). Forcing immediate completion retry."
+                    )
+                    messages = self.context.add_assistant_message(
+                        messages,
+                        content,
+                        reasoning_content=response.reasoning_content,
+                    )
+                    messages.append({"role": "user", "content": self._FORCE_FINAL_REPLY_PROMPT})
+                    continue
+
+                final_content = content
                 break
         
         if final_content is None:
@@ -247,6 +320,51 @@ class AgentLoop:
             chat_id=msg.chat_id,
             content=final_content,
             metadata=msg.metadata or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
+        )
+
+    def _looks_like_deferred_reply(self, content: str) -> bool:
+        """Heuristically detect replies that promise a later result without doing work now."""
+        text = (content or "").strip().lower()
+        if not text:
+            return False
+        for pattern in self._DEFERRED_REPLY_PATTERNS:
+            if re.search(pattern, text, flags=re.IGNORECASE):
+                return True
+        return False
+
+    def _bootstrap_child_session(self, msg: InboundMessage, session: "Session") -> None:
+        """Initialize a child session from parent history once, if requested by channel metadata."""
+        if session.messages:
+            return
+
+        metadata = msg.metadata or {}
+        parent_key = metadata.get("session_parent_key")
+        if not parent_key or not isinstance(parent_key, str):
+            return
+        if parent_key == msg.session_key:
+            return
+
+        max_messages_raw = metadata.get("session_bootstrap_max_messages", 0)
+        try:
+            max_messages = int(max_messages_raw)
+        except (TypeError, ValueError):
+            max_messages = 0
+        if max_messages <= 0:
+            return
+
+        parent = self.sessions.get_or_create(parent_key)
+        if not parent.messages:
+            return
+
+        inherited = parent.messages[-max_messages:]
+        session.messages = [dict(item) for item in inherited]
+        session.metadata.setdefault("seeded_from_session", parent_key)
+        session.metadata.setdefault("seeded_message_count", len(inherited))
+        logger.info(
+            "Seeded child session {} from {} with {} messages",
+            msg.session_key,
+            parent_key,
+            len(inherited),
         )
     
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:

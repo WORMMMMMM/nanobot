@@ -28,6 +28,7 @@ class FeishuConfig(BaseModel):
     encrypt_key: str = ""  # Encrypt Key for event subscription (optional)
     verification_token: str = ""  # Verification Token for event subscription (optional)
     allow_from: list[str] = Field(default_factory=list)  # Allowed user open_ids
+    thread_inherit_rounds: int = 6  # Child session bootstraps from the latest N rounds in main session
 
 
 class DingTalkConfig(BaseModel):
@@ -200,7 +201,13 @@ class GatewayConfig(BaseModel):
 
 class WebSearchConfig(BaseModel):
     """Web search tool configuration."""
+    provider: str = "brave"  # brave | searxng
     api_key: str = ""  # Brave Search API key
+    searxng_base_url: str = "http://localhost:8080"  # Base URL for a self-hosted SearXNG instance
+    searxng_language: str = "zh-CN"
+    searxng_engines: str = ""  # Optional comma-separated engines, e.g. "baidu" or "baidu,bing"
+    fallback_to_brave: bool = True  # For provider=searxng: fallback to Brave if SearXNG is unavailable
+    timeout_seconds: float = 10.0
     max_results: int = 5
 
 

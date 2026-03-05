@@ -45,12 +45,20 @@ exec(command: str, working_dir: str = None) -> str
 ## Web Access
 
 ### web_search
-Search the web using Brave Search API.
+Search the web using Brave Search API or a self-hosted SearXNG.
 ```
 web_search(query: str, count: int = 5) -> str
 ```
 
-Returns search results with titles, URLs, and snippets. Requires `tools.web.search.apiKey` in config.
+Returns search results with titles, URLs, and snippets.
+
+**Provider config (`tools.web.search`):**
+- `provider`: `brave` or `searxng`
+- `apiKey`: Brave API key (for Brave provider and optional fallback)
+- `searxngBaseUrl`: SearXNG endpoint, e.g. `http://localhost:8080`
+- `searxngLanguage`: e.g. `zh-CN`
+- `searxngEngines`: optional engine override, e.g. `baidu` or `baidu,bing`
+- `fallbackToBrave`: when `provider=searxng`, fallback to Brave on failure
 
 ### web_fetch
 Fetch and extract main content from a URL.
