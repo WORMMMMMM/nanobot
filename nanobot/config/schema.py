@@ -221,10 +221,23 @@ class ExecToolConfig(BaseModel):
     timeout: int = 60
 
 
+class CodexToolConfig(BaseModel):
+    """Codex CLI tool configuration."""
+    enabled: bool = True
+    command: str = "codex"
+    timeout: int = 180
+    sandbox: str = "workspace-write"  # read-only | workspace-write | danger-full-access
+    approval: str = "never"  # untrusted | on-request | never
+    model: str = ""  # Empty means Codex CLI default model
+    skip_git_repo_check: bool = True
+    max_output_chars: int = 12000
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    codex: CodexToolConfig = Field(default_factory=CodexToolConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
 
 

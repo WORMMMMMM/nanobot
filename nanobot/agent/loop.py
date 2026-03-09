@@ -15,6 +15,7 @@ from nanobot.agent.context import ContextBuilder
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
+from nanobot.agent.tools.codex_cli import CodexCLITool
 from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
@@ -77,11 +78,12 @@ class AgentLoop:
         web_search_fallback_to_brave: bool = True,
         web_search_timeout_seconds: float = 10.0,
         exec_config: "ExecToolConfig | None" = None,
+        codex_config: "CodexToolConfig | None" = None,
         cron_service: "CronService | None" = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
     ):
-        from nanobot.config.schema import ExecToolConfig
+        from nanobot.config.schema import CodexToolConfig, ExecToolConfig
         from nanobot.cron.service import CronService
         self.bus = bus
         self.provider = provider
@@ -96,6 +98,7 @@ class AgentLoop:
         self.web_search_fallback_to_brave = web_search_fallback_to_brave
         self.web_search_timeout_seconds = web_search_timeout_seconds
         self.exec_config = exec_config or ExecToolConfig()
+        self.codex_config = codex_config or CodexToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         
@@ -136,6 +139,17 @@ class AgentLoop:
             timeout=self.exec_config.timeout,
             restrict_to_workspace=self.restrict_to_workspace,
         ))
+        if self.codex_config.enabled:
+            self.tools.register(CodexCLITool(
+                command=self.codex_config.command,
+                timeout=self.codex_config.timeout,
+                default_cwd=str(self.workspace),
+                default_model=self.codex_config.model,
+                default_sandbox=self.codex_config.sandbox,
+                default_approval=self.codex_config.approval,
+                default_skip_git_repo_check=self.codex_config.skip_git_repo_check,
+                max_output_chars=self.codex_config.max_output_chars,
+            ))
         
         # Web tools
         self.tools.register(WebSearchTool(
@@ -229,6 +243,9 @@ class AgentLoop:
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(msg.channel, msg.chat_id)
+        codex_tool = self.tools.get("codex_cli")
+        if isinstance(codex_tool, CodexCLITool):
+            codex_tool.set_context(msg.session_key)
         
         # Build initial messages (use get_history for LLM-formatted messages)
         messages = self.context.build_messages(
@@ -402,6 +419,9 @@ class AgentLoop:
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(origin_channel, origin_chat_id)
+        codex_tool = self.tools.get("codex_cli")
+        if isinstance(codex_tool, CodexCLITool):
+            codex_tool.set_context(session_key)
         
         # Build messages with the announce content
         messages = self.context.build_messages(
@@ -489,7 +509,8 @@ class AgentLoop:
             channel=channel,
             sender_id="user",
             chat_id=chat_id,
-            content=content
+            content=content,
+            session_id=session_key,
         )
         
         response = await self._process_message(msg)

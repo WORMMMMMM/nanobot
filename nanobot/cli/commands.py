@@ -342,6 +342,7 @@ def gateway(
         web_search_fallback_to_brave=config.tools.web.search.fallback_to_brave,
         web_search_timeout_seconds=config.tools.web.search.timeout_seconds,
         exec_config=config.tools.exec,
+        codex_config=config.tools.codex,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
@@ -452,6 +453,7 @@ def agent(
         web_search_fallback_to_brave=config.tools.web.search.fallback_to_brave,
         web_search_timeout_seconds=config.tools.web.search.timeout_seconds,
         exec_config=config.tools.exec,
+        codex_config=config.tools.codex,
         restrict_to_workspace=config.tools.restrict_to_workspace,
     )
     
